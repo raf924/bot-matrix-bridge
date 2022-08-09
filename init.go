@@ -1,4 +1,4 @@
-package main
+package bot_matrix_bridge
 
 import (
 	"github.com/raf924/bot-matrix-bridge/pkg"
