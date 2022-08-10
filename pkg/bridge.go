@@ -332,11 +332,18 @@ func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	m.guestMutex.Lock()
 	time.Sleep(1 * time.Second)
 	err := func() error {
-
 		userHash := user.Nick() + "#" + user.Id()
-		guest, _, err := m.client.RegisterGuest(&mautrix.ReqRegister{
-			InitialDeviceDisplayName: userHash,
-		})
+		err := fmt.Errorf("")
+		backoff := 0
+		var guest *mautrix.RespRegister
+		for err != nil {
+			time.Sleep(time.Duration(backoff) * time.Second)
+			guest, _, err = m.client.RegisterGuest(&mautrix.ReqRegister{
+				InitialDeviceDisplayName: userHash,
+			})
+			backoff = backoff*2 + 1
+		}
+
 		if err != nil {
 			return err
 		}
