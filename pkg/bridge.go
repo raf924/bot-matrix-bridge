@@ -225,6 +225,7 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			if evt.GetStateKey() == m.client.UserID.String() || evt.GetStateKey() == m.config.User {
 				continue
 			}
+			time.Sleep(500 * time.Millisecond)
 			_, err := m.client.KickUser(id.RoomID(m.config.Room), &mautrix.ReqKickUser{
 				Reason: "",
 				UserID: id.UserID(evt.GetStateKey()),
@@ -329,7 +330,7 @@ func (m *matrixBridge) createOlmMachine(client *mautrix.Client) (*crypto.OlmMach
 
 func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	m.guestMutex.Lock()
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(1 * time.Second)
 	err := func() error {
 
 		userHash := user.Nick() + "#" + user.Id()
