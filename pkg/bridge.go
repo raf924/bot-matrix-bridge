@@ -38,7 +38,7 @@ func NewMatrixConnector(config interface{}) rpc.ConnectorRelay {
 		return &matrixBridge{
 			config:      config,
 			client:      nil,
-			userClients: map[string]*crypto.OlmMachine{},
+			userClients: map[string]*matrixUser{},
 		}
 	}
 }
@@ -49,7 +49,7 @@ type matrixBridge struct {
 	olmMachine      *crypto.OlmMachine
 	botUser         *domain.User
 	config          MatrixConfig
-	userClients     map[string]*crypto.OlmMachine
+	userClients     map[string]*matrixUser
 	stateStore      *stateStore
 	crytpoStore     *crypto.SQLCryptoStore
 	db              *sql.DB
@@ -92,8 +92,8 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 			formattedMessageBody = strings.ReplaceAll(formattedMessageBody, "@"+m.botUser.Nick(), m.formattedMatrixMention(id.UserID(m.config.User)))
 		}
 		for _, user := range message.Recipients() {
-			messageBody = strings.ReplaceAll(messageBody, "@"+user.Nick(), m.matrixMention(m.userClients[user.Nick()+"#"+user.Id()].Client.UserID))
-			formattedMessageBody = strings.ReplaceAll(formattedMessageBody, "@"+user.Nick(), m.formattedMatrixMention(m.userClients[user.Nick()+"#"+user.Id()].Client.UserID))
+			messageBody = strings.ReplaceAll(messageBody, "@"+user.Nick(), m.matrixMention(m.userClients[user.Nick()+"#"+user.Id()].machine.Client.UserID))
+			formattedMessageBody = strings.ReplaceAll(formattedMessageBody, "@"+user.Nick(), m.formattedMatrixMention(m.userClients[user.Nick()+"#"+user.Id()].machine.Client.UserID))
 		}
 
 		olmMachine := func() *crypto.OlmMachine {
@@ -102,7 +102,10 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 				formattedMessageBody = m.formattedMatrixMention(id.UserID(m.config.User)) + "<br>Private message from: " + message.Sender().Nick() + "#" + message.Sender().Id() + ":<br>" + formattedMessageBody
 				return m.olmMachine
 			}
-			return m.userClients[message.Sender().Nick()+"#"+message.Sender().Id()]
+			sender := m.userClients[message.Sender().Nick()+"#"+message.Sender().Id()]
+			sender.mutex.Lock()
+			sender.mutex.Unlock()
+			return sender.machine
 		}()
 		content := event.MessageEventContent{
 			MsgType:       event.MsgText,
@@ -134,7 +137,9 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 			user := m.users.Find(message.User().Nick())
 			if user != nil {
 				if c, ok := m.userClients[user.Nick()+"#"+user.Id()]; ok {
-					_, err = c.Client.LeaveRoom(id.RoomID(m.config.Room))
+					c.mutex.Lock()
+					c.mutex.Unlock()
+					_, err = c.machine.Client.LeaveRoom(id.RoomID(m.config.Room))
 				}
 			}
 		}
@@ -214,7 +219,10 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 		if err != nil {
 			return err
 		}
-		m.userClients[m.botUser.Nick()+"#"+m.botUser.Id()] = m.olmMachine
+		m.userClients[m.botUser.Nick()+"#"+m.botUser.Id()] = &matrixUser{
+			mutex:   &sync.Mutex{},
+			machine: m.olmMachine,
+		}
 		members, err := m.client.Members(id.RoomID(m.config.Room), mautrix.ReqMembers{NotMembership: "leave"}, mautrix.ReqMembers{NotMembership: "ban"})
 		if err != nil {
 			return err
@@ -342,8 +350,13 @@ func withBackoff(f func() error) {
 
 func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	m.guestMutex.Lock()
+	userHash := user.Nick() + "#" + user.Id()
+	m.userClients[userHash] = &matrixUser{
+		mutex:   &sync.Mutex{},
+		machine: nil,
+	}
+	m.userClients[userHash].mutex.Lock()
 	err := func() error {
-		userHash := user.Nick() + "#" + user.Id()
 		var err error
 		var guest *mautrix.RespRegister
 		withBackoff(func() error {
@@ -381,9 +394,10 @@ func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 		withBackoff(func() error {
 			return client.SetDisplayName(user.Nick() + "#" + user.Id())
 		})
-		m.userClients[userHash], err = m.createOlmMachine(client)
+		m.userClients[userHash].machine, err = m.createOlmMachine(client)
 		return err
 	}()
+	m.userClients[userHash].mutex.Unlock()
 	m.guestMutex.Unlock()
 	return err
 }
