@@ -225,14 +225,13 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			if evt.GetStateKey() == m.client.UserID.String() || evt.GetStateKey() == m.config.User {
 				continue
 			}
-			time.Sleep(500 * time.Millisecond)
-			_, err := m.client.KickUser(id.RoomID(m.config.Room), &mautrix.ReqKickUser{
-				Reason: "",
-				UserID: id.UserID(evt.GetStateKey()),
+			withBackoff(func() error {
+				_, err := m.client.KickUser(id.RoomID(m.config.Room), &mautrix.ReqKickUser{
+					Reason: "",
+					UserID: id.UserID(evt.GetStateKey()),
+				})
+				return err
 			})
-			if err != nil {
-				println(err.Error())
-			}
 		}
 		for _, user := range onlineUsers.All() {
 			if user.Is(botUser) {
@@ -313,7 +312,7 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 }
 
 func (m *matrixBridge) createOlmMachine(client *mautrix.Client) (*crypto.OlmMachine, error) {
-	machine := crypto.NewOlmMachine(client, &logger{}, m.crytpoStore, m.stateStore)
+	machine := crypto.NewOlmMachine(client, &logger{}, crypto.NewSQLCryptoStore(m.db, "sqlite3", client.UserID.String(), client.DeviceID, []byte("test"), &logger{}), m.stateStore)
 	err := machine.Load()
 	if err != nil {
 		return nil, err
@@ -328,25 +327,31 @@ func (m *matrixBridge) createOlmMachine(client *mautrix.Client) (*crypto.OlmMach
 	return machine, nil
 }
 
+func withBackoff(f func() error) {
+	backoff := 0
+	err := fmt.Errorf("")
+	for err != nil {
+		if backoff > 0 {
+			println("Backing off for", backoff, "seconds")
+		}
+		time.Sleep(time.Duration(backoff) * time.Second)
+		err = f()
+		backoff = backoff*2 + 1
+	}
+}
+
 func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	m.guestMutex.Lock()
-	time.Sleep(1 * time.Second)
 	err := func() error {
 		userHash := user.Nick() + "#" + user.Id()
-		err := fmt.Errorf("")
-		backoff := 0
+		var err error
 		var guest *mautrix.RespRegister
-		for err != nil {
-			time.Sleep(time.Duration(backoff) * time.Second)
+		withBackoff(func() error {
 			guest, _, err = m.client.RegisterGuest(&mautrix.ReqRegister{
 				InitialDeviceDisplayName: userHash,
 			})
-			backoff = backoff*2 + 1
-		}
-
-		if err != nil {
 			return err
-		}
+		})
 		client, err := mautrix.NewClient(m.config.Url, guest.UserID, guest.AccessToken)
 		if err != nil {
 			return err
@@ -362,21 +367,20 @@ func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 				return err
 			}
 		}
-		_, err = m.client.InviteUser(id.RoomID(m.config.Room), &mautrix.ReqInviteUser{
-			Reason: "test",
-			UserID: client.UserID,
+		withBackoff(func() error {
+			_, err = m.client.InviteUser(id.RoomID(m.config.Room), &mautrix.ReqInviteUser{
+				Reason: "test",
+				UserID: client.UserID,
+			})
+			return err
 		})
-		if err != nil {
+		withBackoff(func() error {
+			_, err = client.JoinRoomByID(id.RoomID(m.config.Room))
 			return err
-		}
-		_, err = client.JoinRoomByID(id.RoomID(m.config.Room))
-		if err != nil {
-			return err
-		}
-		err = client.SetDisplayName(user.Nick() + "#" + user.Id())
-		if err != nil {
-			return err
-		}
+		})
+		withBackoff(func() error {
+			return client.SetDisplayName(user.Nick() + "#" + user.Id())
+		})
 		m.userClients[userHash], err = m.createOlmMachine(client)
 		return err
 	}()
