@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,6 +57,7 @@ type matrixBridge struct {
 	messageQueue    queue.Queue[*domain.ClientMessage]
 	dispatcherGiven bool
 	users           domain.UserList
+	guestMutex      sync.Mutex
 }
 
 func (m *matrixBridge) matrixMention(userID id.UserID) string {
@@ -182,6 +184,7 @@ func (m *matrixBridge) login() error {
 func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUsers domain.UserList, _ string) error {
 	var err error
 	m.RunningContext, err = utils.Run(ctx, func(ctx context.Context) error {
+		m.guestMutex = sync.Mutex{}
 		m.dispatcherGiven = false
 		m.botUser = botUser
 		m.users = onlineUsers
@@ -325,44 +328,51 @@ func (m *matrixBridge) createOlmMachine(client *mautrix.Client) (*crypto.OlmMach
 }
 
 func (m *matrixBridge) createMatrixUser(user *domain.User) error {
-	guest, _, err := m.client.RegisterGuest(&mautrix.ReqRegister{
-		InitialDeviceDisplayName: user.Nick() + "#" + user.Id(),
-	})
-	userHash := user.Nick() + "#" + user.Id()
-	if err != nil {
-		return err
-	}
-	client, err := mautrix.NewClient(m.config.Url, guest.UserID, guest.AccessToken)
-	if err != nil {
-		return err
-	}
-	_, err = client.JoinRoomByID(id.RoomID(m.config.Room))
-	if err != nil {
-		compile, _ := regexp.Compile("https://matrix-client\\.matrix\\.org/_matrix/consent\\?u=(.*)&h=([^.]*)")
-		consentUrl, _ := url.Parse(compile.FindString(err.Error()))
-		formValues := consentUrl.Query()
-		formValues.Set("v", "1.0")
-		_, err = http.PostForm("https://matrix-client.matrix.org/_matrix/consent", formValues)
+	m.guestMutex.Lock()
+	time.Sleep(500 * time.Millisecond)
+	err := func() error {
+
+		userHash := user.Nick() + "#" + user.Id()
+		guest, _, err := m.client.RegisterGuest(&mautrix.ReqRegister{
+			InitialDeviceDisplayName: userHash,
+		})
 		if err != nil {
 			return err
 		}
-	}
-	_, err = m.client.InviteUser(id.RoomID(m.config.Room), &mautrix.ReqInviteUser{
-		Reason: "test",
-		UserID: client.UserID,
-	})
-	if err != nil {
+		client, err := mautrix.NewClient(m.config.Url, guest.UserID, guest.AccessToken)
+		if err != nil {
+			return err
+		}
+		_, err = client.JoinRoomByID(id.RoomID(m.config.Room))
+		if err != nil {
+			compile, _ := regexp.Compile("https://matrix-client\\.matrix\\.org/_matrix/consent\\?u=(.*)&h=([^.]*)")
+			consentUrl, _ := url.Parse(compile.FindString(err.Error()))
+			formValues := consentUrl.Query()
+			formValues.Set("v", "1.0")
+			_, err = http.PostForm("https://matrix-client.matrix.org/_matrix/consent", formValues)
+			if err != nil {
+				return err
+			}
+		}
+		_, err = m.client.InviteUser(id.RoomID(m.config.Room), &mautrix.ReqInviteUser{
+			Reason: "test",
+			UserID: client.UserID,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = client.JoinRoomByID(id.RoomID(m.config.Room))
+		if err != nil {
+			return err
+		}
+		err = client.SetDisplayName(user.Nick() + "#" + user.Id())
+		if err != nil {
+			return err
+		}
+		m.userClients[userHash], err = m.createOlmMachine(client)
 		return err
-	}
-	_, err = client.JoinRoomByID(id.RoomID(m.config.Room))
-	if err != nil {
-		return err
-	}
-	err = client.SetDisplayName(user.Nick() + "#" + user.Id())
-	if err != nil {
-		return err
-	}
-	m.userClients[userHash], err = m.createOlmMachine(client)
+	}()
+	m.guestMutex.Unlock()
 	return err
 }
 
