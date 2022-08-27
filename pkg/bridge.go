@@ -250,7 +250,10 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 }
 
 func (m *matrixBridge) ghostId(user *domain.User) id.UserID {
-	return id.NewUserID(fmt.Sprintf("connector_%s", user.Nick()), m.appService.HomeserverDomain)
+	validMatrixLocalPart := regexp.MustCompile("(?)([A-Z])").ReplaceAllStringFunc(user.Nick(), func(s string) string {
+		return "/" + strings.ToLower(s)
+	})
+	return id.NewUserID(fmt.Sprintf("connector_%s", validMatrixLocalPart), m.appService.HomeserverDomain)
 }
 
 func (m *matrixBridge) handleMessage(evt *event.Event) {
@@ -266,7 +269,9 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 		body = content.Body
 	} else {
 		body = mentionRegex.ReplaceAllStringFunc(content.FormattedBody, func(s string) string {
-			return "@" + mentionRegex.FindStringSubmatch(s)[1]
+			return "@" + regexp.MustCompile("(?)/[a-z]").ReplaceAllStringFunc(mentionRegex.FindStringSubmatch(s)[1], func(s string) string {
+				return strings.ToUpper(strings.TrimPrefix(s, "/"))
+			})
 		})
 	}
 	err := m.Critical(func(ctx context.Context) error {
