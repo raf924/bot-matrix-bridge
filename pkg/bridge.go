@@ -31,7 +31,9 @@ func NewMatrixConnector(config interface{}) rpc.ConnectorRelay {
 		panic(err)
 	}
 	{
-		config := MatrixConfig{}
+		config := MatrixConfig{
+			AppService: appservice.Create(),
+		}
 		err = yaml.NewDecoder(b).Decode(&config)
 		if err != nil {
 			panic(err)
@@ -139,14 +141,9 @@ func (m *matrixBridge) Commands() domain.CommandList {
 }
 
 func (m *matrixBridge) initAppService() error {
-	m.appService = appservice.Create()
-	data, err := yaml.Marshal(m.config.AppService)
-	if err != nil {
-		return err
-	}
-	_ = yaml.Unmarshal(data, m.appService)
+	m.appService = m.config.AppService
 	m.appService.LogConfig.PrintLevel = -10
-	_, err = m.appService.Init()
+	_, err := m.appService.Init()
 	if err != nil {
 		return err
 	}
