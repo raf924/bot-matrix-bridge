@@ -182,6 +182,7 @@ func (m *matrixBridge) startAppService() error {
 		println(evt.Type.Type, evt.Sender, evt.RoomID, evt.Content.AsMessage().FormattedBody)
 		m.handleMessage(evt)
 	})
+	m.appService.Ready = true
 	go func() {
 		_ = m.Critical(func(ctx context.Context) error {
 			ep.Start()
