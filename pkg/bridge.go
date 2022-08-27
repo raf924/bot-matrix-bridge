@@ -22,6 +22,8 @@ import (
 	"strings"
 )
 
+const upperCasePrefix = "="
+
 var mentionRegex = regexp.MustCompile(`(?m)<a href="https://matrix\.to/#/@connector_(\w+):[^"]+">\w+</a>:?`)
 
 func NewMatrixConnector(config interface{}) rpc.ConnectorRelay {
@@ -251,7 +253,7 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 
 func (m *matrixBridge) ghostId(user *domain.User) id.UserID {
 	validMatrixLocalPart := regexp.MustCompile("(?)([A-Z])").ReplaceAllStringFunc(user.Nick(), func(s string) string {
-		return "/" + strings.ToLower(s)
+		return upperCasePrefix + strings.ToLower(s)
 	})
 	return id.NewUserID(fmt.Sprintf("connector_%s", validMatrixLocalPart), m.appService.HomeserverDomain)
 }
@@ -270,7 +272,7 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 	} else {
 		body = mentionRegex.ReplaceAllStringFunc(content.FormattedBody, func(s string) string {
 			return "@" + regexp.MustCompile("(?)/[a-z]").ReplaceAllStringFunc(mentionRegex.FindStringSubmatch(s)[1], func(s string) string {
-				return strings.ToUpper(strings.TrimPrefix(s, "/"))
+				return strings.ToUpper(strings.TrimPrefix(s, upperCasePrefix))
 			})
 		})
 	}
