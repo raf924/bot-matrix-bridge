@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/raf924/bot-matrix-bridge/pkg/utils"
@@ -12,16 +13,16 @@ import (
 	"github.com/raf924/queue"
 	"gopkg.in/yaml.v3"
 	"maunium.net/go/mautrix"
-	"maunium.net/go/mautrix/crypto"
+	"maunium.net/go/mautrix/appservice"
+	"maunium.net/go/mautrix/appservice/sqlstatestore"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
-	"net/http"
-	"net/url"
+	"maunium.net/go/mautrix/util/dbutil"
 	"regexp"
 	"strings"
-	"sync"
-	"time"
 )
+
+var mentionRegex = regexp.MustCompile(`(?m)<a href="https://matrix\.to/#/@connector_(\w+):[^"]+">\w+</a>:?`)
 
 func NewMatrixConnector(config interface{}) rpc.ConnectorRelay {
 	b := new(bytes.Buffer)
@@ -36,44 +37,36 @@ func NewMatrixConnector(config interface{}) rpc.ConnectorRelay {
 			panic(err)
 		}
 		return &matrixBridge{
-			config:      config,
-			client:      nil,
-			userClients: map[string]*matrixUser{},
+			config: config,
 		}
 	}
 }
 
 type matrixBridge struct {
 	*utils.RunningContext
-	client          *mautrix.Client
-	olmMachine      *crypto.OlmMachine
 	botUser         *domain.User
 	config          MatrixConfig
-	userClients     map[string]*matrixUser
-	stateStore      *stateStore
-	crytpoStore     *crypto.SQLCryptoStore
-	db              *sql.DB
 	messageConsumer queue.Consumer[*domain.ClientMessage]
 	messageQueue    queue.Queue[*domain.ClientMessage]
 	dispatcherGiven bool
 	users           domain.UserList
-	guestMutex      sync.Mutex
+	appService      *appservice.AppService
 }
 
 func (m *matrixBridge) matrixMention(userID id.UserID) string {
 	displayName := userID.String()
-	members, err := m.client.JoinedMembers(id.RoomID(m.config.Room))
-	if err == nil && members.Joined[userID].DisplayName != nil {
-		displayName = *members.Joined[userID].DisplayName
+	members, err := m.appService.BotIntent().JoinedMembers(id.RoomID(m.config.Room))
+	if err == nil {
+		displayName = members.Joined[userID].DisplayName
 	}
 	return fmt.Sprintf("%s: ", displayName)
 }
 
 func (m *matrixBridge) formattedMatrixMention(userID id.UserID) string {
 	displayName := userID.String()
-	members, err := m.client.JoinedMembers(id.RoomID(m.config.Room))
-	if err == nil && members.Joined[userID].DisplayName != nil {
-		displayName = *members.Joined[userID].DisplayName
+	members, err := m.appService.BotIntent().JoinedMembers(id.RoomID(m.config.Room))
+	if err == nil {
+		displayName = members.Joined[userID].DisplayName
 	}
 	return fmt.Sprintf("<a href='%s'>%s</a>", userID.URI().MatrixToURL(), displayName)
 }
@@ -82,66 +75,60 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 	var err error
 	switch message := serverMessage.(type) {
 	case *domain.ChatMessage:
-		if message.Sender().Is(m.botUser) {
-			return nil
-		}
 		messageBody := message.Message()
 		formattedMessageBody := messageBody
+		msgType := event.MsgText
 		if message.MentionsConnectorUser() {
 			messageBody = strings.ReplaceAll(messageBody, "@"+m.botUser.Nick(), m.matrixMention(id.UserID(m.config.User)))
 			formattedMessageBody = strings.ReplaceAll(formattedMessageBody, "@"+m.botUser.Nick(), m.formattedMatrixMention(id.UserID(m.config.User)))
 		}
 		for _, user := range message.Recipients() {
-			messageBody = strings.ReplaceAll(messageBody, "@"+user.Nick(), m.matrixMention(m.userClients[user.Nick()+"#"+user.Id()].machine.Client.UserID))
-			formattedMessageBody = strings.ReplaceAll(formattedMessageBody, "@"+user.Nick(), m.formattedMatrixMention(m.userClients[user.Nick()+"#"+user.Id()].machine.Client.UserID))
+			messageBody = strings.ReplaceAll(messageBody, "@"+user.Nick(), m.matrixMention(m.ghostId(user)))
+			formattedMessageBody = strings.ReplaceAll(formattedMessageBody, "@"+user.Nick(), m.formattedMatrixMention(m.ghostId(user)))
 		}
-
-		olmMachine := func() *crypto.OlmMachine {
+		client := func() *mautrix.Client {
 			if message.Private() {
-				messageBody = m.matrixMention(id.UserID(m.config.User)) + "\n Private message from" + message.Sender().Nick() + "#" + message.Sender().Id() + ":\n" + messageBody
-				formattedMessageBody = m.formattedMatrixMention(id.UserID(m.config.User)) + "<br>Private message from: " + message.Sender().Nick() + "#" + message.Sender().Id() + ":<br>" + formattedMessageBody
-				return m.olmMachine
+				if !message.Sender().Is(m.botUser) {
+					messageBody = m.matrixMention(id.UserID(m.config.User)) + "\n Private message from" + message.Sender().Nick() + "#" + message.Sender().Id() + ":\n" + messageBody
+					formattedMessageBody = m.formattedMatrixMention(id.UserID(m.config.User)) + "<br>Private message from: " + message.Sender().Nick() + "#" + message.Sender().Id() + ":<br>" + formattedMessageBody
+				} else {
+					msgType = event.MsgNotice
+				}
+				return m.appService.BotClient()
+			} else if message.Sender().Is(m.botUser) {
+				return nil
 			}
-			sender := m.userClients[message.Sender().Nick()+"#"+message.Sender().Id()]
-			sender.mutex.Lock()
-			sender.mutex.Unlock()
-			return sender.machine
+			return m.appService.Client(m.ghostId(message.Sender()))
 		}()
+		if client == nil {
+			return nil
+		}
 		content := event.MessageEventContent{
-			MsgType:       event.MsgText,
+			MsgType:       msgType,
 			Body:          messageBody,
 			FormattedBody: formattedMessageBody,
 			Format:        event.FormatHTML,
 		}
-		var evt *event.EncryptedEventContent
-		evt, err = olmMachine.EncryptMegolmEvent(id.RoomID(m.config.Room), event.EventMessage, &content)
-		if err != nil {
-			println(err.Error())
-			_, err = olmMachine.Client.SendMessageEvent(id.RoomID(m.config.Room), event.EventMessage, &content)
-		} else {
-			_, err = olmMachine.Client.SendMessageEvent(id.RoomID(m.config.Room), event.EventEncrypted, evt)
-		}
+		_, err = client.SendMessageEvent(id.RoomID(m.config.Room), event.EventMessage, &content)
 	case *domain.UserEvent:
 		switch message.EventType() {
 		case domain.UserJoined:
-			err = m.createMatrixUser(message.User())
+			m.users.Add(message.User())
+			err = m.createMatrixUser(message.User(), true)
 			if err != nil {
 				return err
 			}
-			_, err = m.client.SendNotice(id.RoomID(m.config.Room), message.User().Nick()+" has joined")
+			_, err = m.appService.BotIntent().SendNotice(id.RoomID(m.config.Room), message.User().Nick()+" has joined")
 		case domain.UserLeft:
-			_, err = m.client.SendNotice(id.RoomID(m.config.Room), message.User().Nick()+" has left")
+			_, err = m.appService.BotIntent().SendNotice(id.RoomID(m.config.Room), message.User().Nick()+" has left")
 			if err != nil {
 				return err
 			}
 			user := m.users.Find(message.User().Nick())
 			if user != nil {
-				if c, ok := m.userClients[user.Nick()+"#"+user.Id()]; ok {
-					c.mutex.Lock()
-					c.mutex.Unlock()
-					_, err = c.machine.Client.LeaveRoom(id.RoomID(m.config.Room))
-				}
+				_, _ = m.appService.Intent(m.ghostId(user)).LeaveRoom(id.RoomID(m.config.Room))
 			}
+			m.users.Remove(message.User())
 		}
 	}
 	return err
@@ -151,157 +138,121 @@ func (m *matrixBridge) Commands() domain.CommandList {
 	return domain.NewCommandList()
 }
 
-func findDeviceId(db *sql.DB, userID id.UserID) (id.DeviceID, bool) {
-	query, err := db.Query("SELECT device_id FROM crypto_account WHERE account_id = ?", userID)
+func (m *matrixBridge) initAppService() error {
+	m.appService = appservice.Create()
+	data, err := yaml.Marshal(m.config.AppService)
 	if err != nil {
-		return "", false
+		return err
 	}
-	if !query.Next() {
-		return "", false
-	}
-	deviceId := ""
-	err = query.Scan(&deviceId)
+	_ = yaml.Unmarshal(data, m.appService)
+	m.appService.LogConfig.PrintLevel = -10
+	_, err = m.appService.Init()
 	if err != nil {
-		return "", false
+		return err
 	}
-	return id.DeviceID(deviceId), true
+	db, err := sql.Open("sqlite3", m.config.SqliteDb)
+	if err != nil {
+		return err
+	}
+	withDB, err := dbutil.NewWithDB(db, "sqlite3")
+	if err != nil {
+		return err
+	}
+	stateStore := sqlstatestore.NewSQLStateStore(withDB, dbutil.MauLogger(m.appService.Log.Sub("statestore")))
+	err = stateStore.Upgrade()
+	if err != nil {
+		return err
+	}
+	m.appService.StateStore = stateStore
+	return nil
 }
 
-func (m *matrixBridge) login() error {
-	deviceId, found := findDeviceId(m.db, m.client.UserID)
-	if !found {
-		deviceId = ""
+func (m *matrixBridge) startAppService() error {
+	err := m.appService.BotIntent().SetDisplayName(m.config.DisplayName)
+	if err != nil {
+		return err
 	}
-	_, err := m.client.Login(&mautrix.ReqLogin{
-		Type: mautrix.AuthTypePassword,
-		Identifier: mautrix.UserIdentifier{
-			Type: mautrix.IdentifierTypeUser,
-			User: m.config.Bot,
-		},
-		DeviceID:                 deviceId,
-		Password:                 m.config.Password,
-		InitialDeviceDisplayName: "Hack.chat bot",
-		StoreCredentials:         true,
+	err = m.appService.BotIntent().EnsureJoined(id.RoomID(m.config.Room))
+	if err != nil {
+		return err
+	}
+	err = m.appService.BotIntent().StateEvent(id.RoomID(m.config.Room), event.StateEncryption, "", &event.EncryptionEventContent{})
+	if err == nil {
+		return fmt.Errorf("room `%s` is encrypted", m.config.Room)
+	}
+	ep := appservice.NewEventProcessor(m.appService)
+	ep.On(event.EventMessage, func(evt *event.Event) {
+		println(evt.Type.Type, evt.Sender, evt.RoomID, evt.Content.AsMessage().FormattedBody)
+		m.handleMessage(evt)
 	})
-	return err
+	go func() {
+		_ = m.Critical(func(ctx context.Context) error {
+			ep.Start()
+			return fmt.Errorf("event processor stopped")
+		})
+	}()
+	go func() {
+		_ = m.Critical(func(ctx context.Context) error {
+			m.appService.Start()
+			return fmt.Errorf("appservice stopped")
+		})
+	}()
+	m.OnDone(func() {
+		m.appService.Stop()
+		ep.Stop()
+	})
+	return nil
 }
 
 func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUsers domain.UserList, _ string) error {
 	var err error
-	m.RunningContext, err = utils.Run(ctx, func(ctx context.Context) error {
-		m.guestMutex = sync.Mutex{}
-		m.dispatcherGiven = false
-		m.botUser = botUser
-		m.users = onlineUsers
-		start := time.Now()
-		m.client, err = mautrix.NewClient(m.config.Url, id.UserID(m.config.Bot), m.config.AccessToken)
-		if err != nil {
-			return err
-		}
-		m.db, err = sql.Open("sqlite3", m.config.SqliteDb)
-		if err != nil {
-			return err
-		}
-		err = crypto.NewSQLCryptoStore(m.db, "sqlite3", m.client.UserID.String(), m.client.DeviceID, []byte("test"), &logger{}).CreateTables()
-		if err != nil {
-			return err
-		}
-		err = m.login()
-		if err != nil {
-			return err
-		}
-		m.crytpoStore = crypto.NewSQLCryptoStore(m.db, "sqlite3", m.client.UserID.String(), m.client.DeviceID, []byte("test"), &logger{})
-		m.stateStore = NewStateStore(id.RoomID(m.config.Room), &event.EncryptionEventContent{})
-		m.client.Syncer.(*mautrix.DefaultSyncer).OnEventType(event.StateEncryption, func(source mautrix.EventSource, evt *event.Event) {
-			m.stateStore.encEvent = evt.Content.AsEncryption()
-		})
-		m.olmMachine, err = m.createOlmMachine(m.client)
-		if err != nil {
-			return err
-		}
-		m.userClients[m.botUser.Nick()+"#"+m.botUser.Id()] = &matrixUser{
-			mutex:   &sync.Mutex{},
-			machine: m.olmMachine,
-		}
-		members, err := m.client.Members(id.RoomID(m.config.Room), mautrix.ReqMembers{NotMembership: "leave"}, mautrix.ReqMembers{NotMembership: "ban"})
-		if err != nil {
-			return err
-		}
-		for _, evt := range members.Chunk {
-			memberEventContent := evt.Content.AsMember()
-			println(evt.Sender, evt.GetStateKey(), memberEventContent.Displayname, memberEventContent.Membership)
-			if evt.GetStateKey() == m.client.UserID.String() || evt.GetStateKey() == m.config.User {
-				continue
-			}
-			withBackoff(func() error {
-				_, err := m.client.KickUser(id.RoomID(m.config.Room), &mautrix.ReqKickUser{
-					Reason: "",
-					UserID: id.UserID(evt.GetStateKey()),
-				})
-				return err
-			})
-		}
-		for _, user := range onlineUsers.All() {
-			if user.Is(botUser) {
-				continue
-			}
-			err = m.createMatrixUser(user)
-			if err != nil {
-				return err
-			}
-		}
+	m.RunningContext = utils.Runnable(ctx, func(ctx context.Context) error {
 		m.messageQueue = queue.NewQueue[*domain.ClientMessage]()
 		m.messageConsumer, err = m.messageQueue.NewConsumer()
 		if err != nil {
 			return err
 		}
-		_, err = m.olmMachine.GenerateAndUploadCrossSigningKeys(m.config.Password, m.config.Passphrase)
+		m.dispatcherGiven = false
+		m.botUser = botUser
+		m.users = domain.NewUserList(onlineUsers.All()...)
+		err = m.initAppService()
+		if err != nil {
+			return fmt.Errorf("failed to initialize appservice: %w", err)
+		}
+		err = m.startAppService()
 		if err != nil {
 			return err
 		}
-		m.client.Syncer.(*mautrix.DefaultSyncer).OnEvent(func(source mautrix.EventSource, evt *event.Event) {
-			println("event", source.String(), evt.Type.Type, "-", evt.Type.Class.Name(), evt.GetStateKey())
-		})
-		m.client.Syncer.(*mautrix.DefaultSyncer).OnEventType(event.ToDeviceEncrypted, func(source mautrix.EventSource, evt *event.Event) {
-			println("encrypted to device", source.String(), evt.Type.Type, evt.Type.Class.Name(), evt.Sender, evt.GetStateKey())
-		})
-		m.client.Syncer.(*mautrix.DefaultSyncer).OnEventType(event.EventEncrypted, func(source mautrix.EventSource, evt *event.Event) {
-			encrypted := evt.Content.AsEncrypted()
-			println("encrypted", source.String(), evt.Type.Type, evt.Type.Class.Name(), evt.Sender, evt.GetStateKey(), encrypted.Algorithm)
-			if time.UnixMilli(evt.Timestamp).Before(start) {
-				return
+		members, err := m.appService.BotIntent().JoinedMembers(id.RoomID(m.config.Room))
+		if err != nil {
+			return err
+		}
+		for _, user := range m.users.All() {
+			if user.Is(botUser) {
+				continue
 			}
-			if evt.Sender == m.client.UserID {
-				return
+			ghostId := m.ghostId(user)
+			if _, ok := members.Joined[ghostId]; ok {
+				delete(members.Joined, ghostId)
 			}
-			go func(evt *event.Event, encrypted *event.EncryptedEventContent) {
-				megolmEvent, err := m.olmMachine.DecryptMegolmEvent(evt)
-				if err != nil {
-					println(err.Error())
-					return
-				}
-				println("decrypted", megolmEvent.Type.Type, megolmEvent.Type.Class.Name(), megolmEvent.Content.AsMessage().Body, megolmEvent.Content.AsMessage().FormattedBody)
-				m.handleMessage(megolmEvent)
-			}(evt, encrypted)
-		})
-		m.client.Syncer.(*mautrix.DefaultSyncer).OnEventType(event.EventMessage, func(source mautrix.EventSource, evt *event.Event) {
-			println("message", evt.Content.AsMessage().Body, evt.Content.AsMessage().FormattedBody)
-			if evt.Sender != m.client.UserID {
-				return
-			}
-			m.handleMessage(evt)
-		})
-		go func() {
-			err = m.Critical(func(ctx context.Context) error {
-				return m.client.SyncWithContext(ctx)
-			})
+			err := m.createMatrixUser(user, false)
 			if err != nil {
-				println(err.Error())
+				return err
 			}
-		}()
+		}
+		for userID := range members.Joined {
+			if userID == m.appService.BotMXID() || userID.Localpart() == m.config.User {
+				continue
+			}
+			_, _ = m.appService.Intent(userID).LeaveRoom(id.RoomID(m.config.Room))
+		}
 		return nil
 	})
-	return err
+	return m.Run()
+}
+
+func (m *matrixBridge) ghostId(user *domain.User) id.UserID {
+	return id.NewUserID(fmt.Sprintf("connector_%s", user.Nick()), m.appService.HomeserverDomain)
 }
 
 func (m *matrixBridge) handleMessage(evt *event.Event) {
@@ -309,97 +260,62 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 		return
 	}
 	content := evt.Content.AsMessage()
-	for s := range m.userClients {
-		if strings.Contains(content.Body, s+":") {
-			content.Body = strings.ReplaceAll(content.Body, s+":", "@"+s)
-		}
+	if content.MsgType != event.MsgText && content.MsgType != event.MsgEmote {
+		return
 	}
-	_ = m.Critical(func(ctx context.Context) error {
-		return m.messageQueue.Produce(domain.NewClientMessage(content.Body, nil, false))
+	var body string
+	if content.FormattedBody == "" {
+		body = content.Body
+	} else {
+		body = mentionRegex.ReplaceAllStringFunc(content.FormattedBody, func(s string) string {
+			return "@" + mentionRegex.FindStringSubmatch(s)[1]
+		})
+	}
+	err := m.Critical(func(ctx context.Context) error {
+		switch content.MsgType {
+		case event.MsgText:
+			return m.messageQueue.Produce(domain.NewClientMessage(body, nil, false))
+		case event.MsgEmote:
+			return m.messageQueue.Produce(domain.NewEmote(body))
+		default:
+			return errors.New("invalid message type")
+		}
 	})
-}
-
-func (m *matrixBridge) createOlmMachine(client *mautrix.Client) (*crypto.OlmMachine, error) {
-	machine := crypto.NewOlmMachine(client, &logger{}, crypto.NewSQLCryptoStore(m.db, "sqlite3", client.UserID.String(), client.DeviceID, []byte("test"), &logger{}), m.stateStore)
-	err := machine.Load()
 	if err != nil {
-		return nil, err
+		println("error while handling message:", err.Error())
 	}
-	client.Syncer.(*mautrix.DefaultSyncer).OnSync(func(resp *mautrix.RespSync, since string) bool {
-		machine.ProcessSyncResponse(resp, since)
-		return true
-	})
-	client.Syncer.(*mautrix.DefaultSyncer).OnEventType(event.StateMember, func(source mautrix.EventSource, evt *event.Event) {
-		machine.HandleMemberEvent(evt)
-	})
-	return machine, nil
-}
-
-func withBackoff(f func() error) {
-	backoff := 0
-	err := fmt.Errorf("")
-	for err != nil {
-		if backoff > 0 {
-			println("Backing off for", backoff, "seconds")
-		}
-		time.Sleep(time.Duration(backoff) * time.Second)
-		err = f()
-		backoff = backoff*2 + 1
+	err = m.appService.BotIntent().MarkRead(evt.RoomID, evt.ID)
+	if err != nil {
+		return
 	}
 }
 
-func (m *matrixBridge) createMatrixUser(user *domain.User) error {
-	m.guestMutex.Lock()
-	userHash := user.Nick() + "#" + user.Id()
-	m.userClients[userHash] = &matrixUser{
-		mutex:   &sync.Mutex{},
-		machine: nil,
-	}
-	m.userClients[userHash].mutex.Lock()
-	err := func() error {
-		var err error
-		var guest *mautrix.RespRegister
-		withBackoff(func() error {
-			guest, _, err = m.client.RegisterGuest(&mautrix.ReqRegister{
-				InitialDeviceDisplayName: userHash,
-			})
-			return err
-		})
-		client, err := mautrix.NewClient(m.config.Url, guest.UserID, guest.AccessToken)
-		if err != nil {
-			return err
-		}
-		_, err = client.JoinRoomByID(id.RoomID(m.config.Room))
-		if err != nil {
-			compile, _ := regexp.Compile("https://matrix-client\\.matrix\\.org/_matrix/consent\\?u=(.*)&h=([^.]*)")
-			consentUrl, _ := url.Parse(compile.FindString(err.Error()))
-			formValues := consentUrl.Query()
-			formValues.Set("v", "1.0")
-			_, err = http.PostForm("https://matrix-client.matrix.org/_matrix/consent", formValues)
-			if err != nil {
-				return err
-			}
-		}
-		withBackoff(func() error {
-			_, err = m.client.InviteUser(id.RoomID(m.config.Room), &mautrix.ReqInviteUser{
-				Reason: "test",
-				UserID: client.UserID,
-			})
-			return err
-		})
-		withBackoff(func() error {
-			_, err = client.JoinRoomByID(id.RoomID(m.config.Room))
-			return err
-		})
-		withBackoff(func() error {
-			return client.SetDisplayName(user.Nick() + "#" + user.Id())
-		})
-		m.userClients[userHash].machine, err = m.createOlmMachine(client)
+func (m *matrixBridge) createMatrixUser(user *domain.User, new bool) error {
+	var err error
+	userID := m.ghostId(user)
+	err = m.appService.Intent(userID).EnsureRegistered()
+	if err != nil {
 		return err
-	}()
-	m.userClients[userHash].mutex.Unlock()
-	m.guestMutex.Unlock()
-	return err
+	}
+	err = m.appService.BotIntent().EnsureInvited(id.RoomID(m.config.Room), userID)
+	if err != nil {
+		return err
+	}
+	err = m.appService.Intent(userID).EnsureJoined(id.RoomID(m.config.Room))
+	if err != nil {
+		return err
+	}
+	if new {
+		_, err = m.appService.BotIntent().SendNotice(id.RoomID(m.config.Room), user.Nick()+" has joined")
+		if err != nil {
+			return err
+		}
+	}
+	err = m.appService.Intent(userID).SetDisplayName(user.Nick())
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (m *matrixBridge) Accept() (rpc.Dispatcher, error) {
