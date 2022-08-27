@@ -271,7 +271,7 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 		body = content.Body
 	} else {
 		body = mentionRegex.ReplaceAllStringFunc(content.FormattedBody, func(s string) string {
-			return "@" + regexp.MustCompile("(?)/[a-z]").ReplaceAllStringFunc(mentionRegex.FindStringSubmatch(s)[1], func(s string) string {
+			return "@" + regexp.MustCompile("(?)"+upperCasePrefix+"[a-z]").ReplaceAllStringFunc(mentionRegex.FindStringSubmatch(s)[1], func(s string) string {
 				return strings.ToUpper(strings.TrimPrefix(s, upperCasePrefix))
 			})
 		})
