@@ -24,7 +24,7 @@ import (
 
 const upperCasePrefix = "="
 
-var mentionRegex = regexp.MustCompile(`(?m)<a href="https://matrix\.to/#/@connector_(\w+):[^"]+">\w+</a>:?`)
+var mentionRegex = regexp.MustCompile(`(?m)<a href="https://matrix\.to/#/@connector_([0-9a-z-.=_/]+):[^"]+">\w+</a>:?`)
 
 func NewMatrixConnector(config interface{}) rpc.ConnectorRelay {
 	b := new(bytes.Buffer)
