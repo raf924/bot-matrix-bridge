@@ -16,6 +16,7 @@ import (
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/appservice/sqlstatestore"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/format"
 	"maunium.net/go/mautrix/id"
 	"maunium.net/go/mautrix/util/dbutil"
 	"regexp"
@@ -79,24 +80,22 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 	var err error
 	switch message := serverMessage.(type) {
 	case *domain.ChatMessage:
-		messageBody := message.Message()
-		formattedMessageBody := messageBody
-		msgType := event.MsgText
+		messageEvent := format.RenderMarkdown(message.Message(), true, false)
 		if message.MentionsConnectorUser() {
-			messageBody = strings.ReplaceAll(messageBody, "@"+m.botUser.Nick(), m.matrixMention(id.UserID(m.config.User)))
-			formattedMessageBody = strings.ReplaceAll(formattedMessageBody, "@"+m.botUser.Nick(), m.formattedMatrixMention(id.UserID(m.config.User)))
+			messageEvent.Body = strings.ReplaceAll(messageEvent.Body, "@"+m.botUser.Nick(), m.matrixMention(id.UserID(m.config.User)))
+			messageEvent.FormattedBody = strings.ReplaceAll(messageEvent.FormattedBody, "@"+m.botUser.Nick(), m.formattedMatrixMention(id.UserID(m.config.User)))
 		}
 		for _, user := range message.Recipients() {
-			messageBody = strings.ReplaceAll(messageBody, "@"+user.Nick(), m.matrixMention(m.ghostId(user)))
-			formattedMessageBody = strings.ReplaceAll(formattedMessageBody, "@"+user.Nick(), m.formattedMatrixMention(m.ghostId(user)))
+			messageEvent.Body = strings.ReplaceAll(messageEvent.Body, "@"+user.Nick(), m.matrixMention(m.ghostId(user)))
+			messageEvent.FormattedBody = strings.ReplaceAll(messageEvent.FormattedBody, "@"+user.Nick(), m.formattedMatrixMention(m.ghostId(user)))
 		}
 		client := func() *mautrix.Client {
 			if message.Private() {
 				if !message.Sender().Is(m.botUser) {
-					messageBody = m.matrixMention(id.UserID(m.config.User)) + "\n Private message from" + message.Sender().Nick() + "#" + message.Sender().Id() + ":\n" + messageBody
-					formattedMessageBody = m.formattedMatrixMention(id.UserID(m.config.User)) + "<br>Private message from: " + message.Sender().Nick() + "#" + message.Sender().Id() + ":<br>" + formattedMessageBody
+					messageEvent.Body = m.matrixMention(id.UserID(m.config.User)) + "\n Private message from" + message.Sender().Nick() + "#" + message.Sender().Id() + ":\n" + messageEvent.Body
+					messageEvent.FormattedBody = m.formattedMatrixMention(id.UserID(m.config.User)) + "<br>Private message from: " + message.Sender().Nick() + "#" + message.Sender().Id() + ":<br>" + messageEvent.FormattedBody
 				} else {
-					msgType = event.MsgNotice
+					messageEvent.MsgType = event.MsgNotice
 				}
 				return m.appService.BotClient()
 			} else if message.Sender().Is(m.botUser) {
@@ -107,13 +106,7 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 		if client == nil {
 			return nil
 		}
-		content := event.MessageEventContent{
-			MsgType:       msgType,
-			Body:          messageBody,
-			FormattedBody: formattedMessageBody,
-			Format:        event.FormatHTML,
-		}
-		_, err = client.SendMessageEvent(id.RoomID(m.config.Room), event.EventMessage, &content)
+		_, err = client.SendMessageEvent(id.RoomID(m.config.Room), event.EventMessage, messageEvent)
 	case *domain.UserEvent:
 		switch message.EventType() {
 		case domain.UserJoined:
