@@ -118,7 +118,7 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 		switch message.EventType() {
 		case domain.UserJoined:
 			m.users.Add(message.User())
-			err = m.createMatrixUser(message.User(), true)
+			err = m.createMatrixUser(message.User())
 			if err != nil {
 				return err
 			}
@@ -227,6 +227,7 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 		if err != nil {
 			return err
 		}
+		//TODO: do a sendbatch instead
 		for _, user := range m.users.All() {
 			if user.Is(botUser) {
 				continue
@@ -235,7 +236,7 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			if _, ok := members.Joined[ghostId]; ok {
 				delete(members.Joined, ghostId)
 			}
-			err := m.createMatrixUser(user, false)
+			err := m.createMatrixUser(user)
 			if err != nil {
 				return err
 			}
@@ -295,10 +296,14 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 	}
 }
 
-func (m *matrixBridge) createMatrixUser(user *domain.User, new bool) error {
+func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	var err error
 	userID := m.ghostId(user)
 	err = m.appService.Intent(userID).EnsureRegistered()
+	if err != nil {
+		return err
+	}
+	err = m.appService.Intent(userID).SetDisplayName(user.Nick())
 	if err != nil {
 		return err
 	}
@@ -307,16 +312,6 @@ func (m *matrixBridge) createMatrixUser(user *domain.User, new bool) error {
 		return err
 	}
 	err = m.appService.Intent(userID).EnsureJoined(id.RoomID(m.config.Room))
-	if err != nil {
-		return err
-	}
-	if new {
-		_, err = m.appService.BotIntent().SendNotice(id.RoomID(m.config.Room), user.Nick()+" has joined")
-		if err != nil {
-			return err
-		}
-	}
-	err = m.appService.Intent(userID).SetDisplayName(user.Nick())
 	if err != nil {
 		return err
 	}
