@@ -81,6 +81,10 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 	switch message := serverMessage.(type) {
 	case *domain.ChatMessage:
 		messageEvent := format.RenderMarkdown(message.Message(), true, false)
+		if messageEvent.FormattedBody == "" {
+			messageEvent.FormattedBody = messageEvent.Body
+			messageEvent.Format = event.FormatHTML
+		}
 		if message.MentionsConnectorUser() {
 			messageEvent.Body = strings.ReplaceAll(messageEvent.Body, "@"+m.botUser.Nick(), m.matrixMention(id.UserID(m.config.User)))
 			messageEvent.FormattedBody = strings.ReplaceAll(messageEvent.FormattedBody, "@"+m.botUser.Nick(), m.formattedMatrixMention(id.UserID(m.config.User)))
@@ -235,7 +239,7 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			}
 		}
 		for userID := range members.Joined {
-			if userID == m.appService.BotMXID() || userID.Localpart() == m.config.User {
+			if userID == m.appService.BotMXID() || userID.String() == m.config.User || userID.Localpart() == m.config.User {
 				continue
 			}
 			_, _ = m.appService.Intent(userID).LeaveRoom(id.RoomID(m.config.Room))
