@@ -19,6 +19,7 @@ import (
 	"maunium.net/go/mautrix/format"
 	"maunium.net/go/mautrix/id"
 	"maunium.net/go/mautrix/util/dbutil"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -26,6 +27,11 @@ import (
 const upperCasePrefix = "="
 
 var mentionRegex = regexp.MustCompile(`(?m)<a href="https://matrix\.to/#/@connector_([0-9a-z-.=_/]+):[^"]+">\w+</a>:?`)
+var replyRegex = regexp.MustCompile(`(?i)<mx-reply>.*</mx-reply>(.+)`)
+
+func allowedImageLinksRegex(allowedDomains []string) *regexp.Regexp {
+	return regexp.MustCompile(fmt.Sprintf(`(?mi)https://([a-zA-Z0-9]+\.)?(%s)(/.+)+\.(jpg|jpeg|png)`, strings.ReplaceAll(strings.Join(allowedDomains, "|"), ".", "\\.")))
+}
 
 func NewMatrixConnector(config interface{}) rpc.ConnectorRelay {
 	b := new(bytes.Buffer)
@@ -42,20 +48,22 @@ func NewMatrixConnector(config interface{}) rpc.ConnectorRelay {
 			panic(err)
 		}
 		return &matrixBridge{
-			config: config,
+			config:            config,
+			allowedImageRegex: allowedImageLinksRegex(config.ImageDisplay.AllowedDomains),
 		}
 	}
 }
 
 type matrixBridge struct {
 	*utils.RunningContext
-	botUser         *domain.User
-	config          MatrixConfig
-	messageConsumer queue.Consumer[*domain.ClientMessage]
-	messageQueue    queue.Queue[*domain.ClientMessage]
-	dispatcherGiven bool
-	users           domain.UserList
-	appService      *appservice.AppService
+	botUser           *domain.User
+	config            MatrixConfig
+	messageConsumer   queue.Consumer[*domain.ClientMessage]
+	messageQueue      queue.Queue[*domain.ClientMessage]
+	dispatcherGiven   bool
+	users             domain.UserList
+	appService        *appservice.AppService
+	allowedImageRegex *regexp.Regexp
 }
 
 func (m *matrixBridge) matrixMention(userID id.UserID) string {
@@ -80,6 +88,29 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 	var err error
 	switch message := serverMessage.(type) {
 	case *domain.ChatMessage:
+		if m.config.ImageDisplay.Enabled {
+			submatches := m.allowedImageRegex.FindAllStringSubmatch(message.Message(), -1)
+			for _, submatch := range submatches {
+				imgUrl, err := url.Parse(submatch[0])
+				if err != nil {
+					println("could not parse image link", submatch[0])
+					continue
+				}
+				resp, err := m.appService.Client(m.ghostId(message.Sender())).UploadLink(imgUrl.String())
+				if err != nil {
+					println("could not get image", imgUrl.String(), err.Error())
+					continue
+				}
+				_, err = m.appService.Client(m.ghostId(message.Sender())).SendMessageEvent(id.RoomID(m.config.Room), event.EventMessage, &event.MessageEventContent{
+					MsgType: event.MsgImage,
+					URL:     resp.ContentURI.CUString(),
+				})
+				if err != nil {
+					println("could not send image", imgUrl.String(), err.Error())
+					continue
+				}
+			}
+		}
 		messageEvent := format.RenderMarkdown(message.Message(), true, false)
 		if messageEvent.FormattedBody == "" {
 			messageEvent.FormattedBody = messageEvent.Body
@@ -256,24 +287,40 @@ func (m *matrixBridge) ghostId(user *domain.User) id.UserID {
 	return id.NewUserID(fmt.Sprintf("connector_%s", validMatrixLocalPart), m.appService.HomeserverDomain)
 }
 
+func (m *matrixBridge) formatMessageBody(content *event.MessageEventContent, followReply bool) string {
+	var body string
+	if content.FormattedBody == "" {
+		body = content.Body
+	} else {
+		if followReply && content.GetReplyTo() != "" {
+			submatches := replyRegex.FindAllStringSubmatch(content.FormattedBody, -1)
+			content.FormattedBody = submatches[0][1]
+			repliedEvent, err := m.appService.BotClient().GetEvent(id.RoomID(m.config.Room), content.GetReplyTo())
+			if err == nil {
+				body = ">" + m.formatMessageBody(repliedEvent.Content.AsMessage(), false) + "\n\n"
+			}
+		}
+		body += mentionRegex.ReplaceAllStringFunc(content.FormattedBody, func(s string) string {
+			return "@" + regexp.MustCompile("(?)"+upperCasePrefix+"[a-z]").ReplaceAllStringFunc(mentionRegex.FindStringSubmatch(s)[1], func(s string) string {
+				return strings.ToUpper(strings.TrimPrefix(s, upperCasePrefix))
+			})
+		})
+	}
+	return body
+}
+
 func (m *matrixBridge) handleMessage(evt *event.Event) {
 	if evt.Sender.String() != m.config.User {
+		return
+	}
+	if evt.RoomID.String() != m.config.Room {
 		return
 	}
 	content := evt.Content.AsMessage()
 	if content.MsgType != event.MsgText && content.MsgType != event.MsgEmote {
 		return
 	}
-	var body string
-	if content.FormattedBody == "" {
-		body = content.Body
-	} else {
-		body = mentionRegex.ReplaceAllStringFunc(content.FormattedBody, func(s string) string {
-			return "@" + regexp.MustCompile("(?)"+upperCasePrefix+"[a-z]").ReplaceAllStringFunc(mentionRegex.FindStringSubmatch(s)[1], func(s string) string {
-				return strings.ToUpper(strings.TrimPrefix(s, upperCasePrefix))
-			})
-		})
-	}
+	body := m.formatMessageBody(content, true)
 	err := m.Critical(func(ctx context.Context) error {
 		switch content.MsgType {
 		case event.MsgText:
@@ -286,6 +333,7 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 	})
 	if err != nil {
 		println("error while handling message:", err.Error())
+		return
 	}
 	err = m.appService.BotIntent().MarkRead(evt.RoomID, evt.ID)
 	if err != nil {

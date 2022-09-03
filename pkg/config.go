@@ -11,4 +11,8 @@ type MatrixConfig struct {
 	Passphrase       string                 `yaml:"passphrase"`
 	AppService       *appservice.AppService `yaml:"app_service"`
 	BridgeConfigPath string                 `yaml:"bridgeConfig"`
+	ImageDisplay     struct {
+		Enabled        bool     `yaml:"enabled"`
+		AllowedDomains []string `yaml:"allowed_domains"`
+	} `yaml:"image_display"`
 }
