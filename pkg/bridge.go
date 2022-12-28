@@ -54,6 +54,9 @@ func NewMatrixConnector(config interface{}) rpc.ConnectorRelay {
 	}
 }
 
+var _ rpc.ConnectorRelay = (*matrixBridge)(nil)
+var _ appservice.QueryHandler = (*matrixBridge)(nil)
+
 type matrixBridge struct {
 	*utils.RunningContext
 	botUser           *domain.User
@@ -62,8 +65,23 @@ type matrixBridge struct {
 	messageQueue      queue.Queue[*domain.ClientMessage]
 	dispatcherGiven   bool
 	users             domain.UserList
+	matrixUsers       map[id.UserID]string
 	appService        *appservice.AppService
 	allowedImageRegex *regexp.Regexp
+}
+
+func (m *matrixBridge) QueryAlias(alias string) bool {
+	resp, err := m.appService.BotClient().ResolveAlias(id.RoomAlias(alias))
+	if err != nil {
+		println(err)
+		return false
+	}
+	return resp.RoomID.String() == m.config.Room
+}
+
+func (m *matrixBridge) QueryUser(userID id.UserID) bool {
+	_, ok := m.matrixUsers[userID]
+	return ok
 }
 
 func (m *matrixBridge) matrixMention(userID id.UserID) string {
@@ -158,7 +176,9 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 			}
 			user := m.users.Find(message.User().Nick())
 			if user != nil {
-				_, _ = m.appService.Intent(m.ghostId(user)).LeaveRoom(id.RoomID(m.config.Room))
+				ghostId := m.ghostId(user)
+				_, _ = m.appService.Intent(ghostId).LeaveRoom(id.RoomID(m.config.Room))
+				delete(m.matrixUsers, ghostId)
 			}
 			m.users.Remove(message.User())
 		}
@@ -212,6 +232,7 @@ func (m *matrixBridge) startAppService() error {
 		println(evt.Type.Type, evt.Sender, evt.RoomID, evt.Content.AsMessage().FormattedBody)
 		m.handleMessage(evt)
 	})
+	m.appService.QueryHandler = m
 	m.appService.Ready = true
 	go func() {
 		_ = m.Critical(func(ctx context.Context) error {
@@ -235,6 +256,7 @@ func (m *matrixBridge) startAppService() error {
 func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUsers domain.UserList, _ string) error {
 	var err error
 	m.RunningContext = utils.Runnable(ctx, func(ctx context.Context) error {
+		m.matrixUsers = map[id.UserID]string{}
 		m.messageQueue = queue.NewQueue[*domain.ClientMessage]()
 		m.messageConsumer, err = m.messageQueue.NewConsumer()
 		if err != nil {
@@ -255,7 +277,6 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 		if err != nil {
 			return err
 		}
-		//TODO: do a sendbatch instead
 		for _, user := range m.users.All() {
 			if user.Is(botUser) {
 				continue
@@ -292,10 +313,10 @@ func (m *matrixBridge) formatMessageBody(content *event.MessageEventContent, fol
 	if content.FormattedBody == "" {
 		body = content.Body
 	} else {
-		if followReply && content.GetReplyTo() != "" {
+		if followReply && content.RelatesTo.GetReplyTo() != "" {
 			submatches := replyRegex.FindAllStringSubmatch(content.FormattedBody, -1)
 			content.FormattedBody = submatches[0][1]
-			repliedEvent, err := m.appService.BotClient().GetEvent(id.RoomID(m.config.Room), content.GetReplyTo())
+			repliedEvent, err := m.appService.BotClient().GetEvent(id.RoomID(m.config.Room), content.RelatesTo.GetReplyTo())
 			if err == nil {
 				body = ">" + m.formatMessageBody(repliedEvent.Content.AsMessage(), false) + "\n\n"
 			}
@@ -360,6 +381,7 @@ func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	if err != nil {
 		return err
 	}
+	m.matrixUsers[userID] = user.Nick()
 	return nil
 }
 
