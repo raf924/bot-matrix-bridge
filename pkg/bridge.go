@@ -294,7 +294,9 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			if userID == m.appService.BotMXID() || userID.String() == m.config.User || userID.Localpart() == m.config.User {
 				continue
 			}
-			_, _ = m.appService.Intent(userID).LeaveRoom(id.RoomID(m.config.Room))
+			go func(userIntent *appservice.IntentAPI) {
+				_, _ = userIntent.LeaveRoom(id.RoomID(m.config.Room))
+			}(m.appService.Intent(userID))
 		}
 		return nil
 	})
