@@ -12,6 +12,7 @@ import (
 	"github.com/raf924/connector-sdk/rpc"
 	"github.com/raf924/queue"
 	"gopkg.in/yaml.v3"
+	"log"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/appservice/sqlstatestore"
@@ -103,6 +104,7 @@ func (m *matrixBridge) formattedMatrixMention(userID id.UserID) string {
 }
 
 func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
+	log.Println("Dispatching server message")
 	var err error
 	switch message := serverMessage.(type) {
 	case *domain.ChatMessage:
@@ -278,6 +280,7 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			return err
 		}
 		for _, user := range m.users.All() {
+			log.Println("Checking user", user.Nick())
 			if user.Is(botUser) {
 				continue
 			}
@@ -289,13 +292,16 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			if err != nil {
 				return err
 			}
+			log.Println("Created user", ghostId)
 		}
 		for userID := range members.Joined {
+			log.Println("Checking absent user", userID)
 			if userID == m.appService.BotMXID() || userID.String() == m.config.User || userID.Localpart() == m.config.User {
 				continue
 			}
 			go func(userIntent *appservice.IntentAPI) {
-				_, _ = userIntent.LeaveRoom(id.RoomID(m.config.Room))
+				_, err := userIntent.LeaveRoom(id.RoomID(m.config.Room))
+				log.Printf("failed to force absent user to leave: %v\n", err)
 			}(m.appService.Intent(userID))
 		}
 		return nil
@@ -392,12 +398,13 @@ func (m *matrixBridge) Accept() (rpc.Dispatcher, error) {
 		ctx, can := context.WithCancel(m)
 		<-ctx.Done()
 		can()
-		return nil, ctx.Err()
+		return nil, fmt.Errorf("dispatcher was cancelled: %w", ctx.Err())
 	}
 	m.dispatcherGiven = true
 	return m, nil
 }
 
 func (m *matrixBridge) Recv() (*domain.ClientMessage, error) {
+	log.Println("Fetching client message")
 	return m.messageConsumer.Consume(m)
 }
