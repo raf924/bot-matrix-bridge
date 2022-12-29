@@ -107,6 +107,8 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 	var err error
 	switch message := serverMessage.(type) {
 	case *domain.ChatMessage:
+		senderGhostId := m.ghostId(message.Sender())
+		senderIntent := m.appService.Intent(senderGhostId)
 		if m.config.ImageDisplay.Enabled {
 			submatches := m.allowedImageRegex.FindAllStringSubmatch(message.Message(), -1)
 			for _, submatch := range submatches {
@@ -115,19 +117,21 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 					println("could not parse image link", submatch[0])
 					continue
 				}
-				resp, err := m.appService.Client(m.ghostId(message.Sender())).UploadLink(imgUrl.String())
-				if err != nil {
-					println("could not get image", imgUrl.String(), err.Error())
-					continue
-				}
-				_, err = m.appService.Client(m.ghostId(message.Sender())).SendMessageEvent(id.RoomID(m.config.Room), event.EventMessage, &event.MessageEventContent{
-					MsgType: event.MsgImage,
-					URL:     resp.ContentURI.CUString(),
-				})
-				if err != nil {
-					println("could not send image", imgUrl.String(), err.Error())
-					continue
-				}
+				go func(imgUrl string) {
+					resp, err := senderIntent.UploadLink(imgUrl)
+					if err != nil {
+						println("could not get image", imgUrl, err.Error())
+						return
+					}
+					_, err = senderIntent.SendMessageEvent(id.RoomID(m.config.Room), event.EventMessage, &event.MessageEventContent{
+						MsgType: event.MsgImage,
+						URL:     resp.ContentURI.CUString(),
+					})
+					if err != nil {
+						println("could not send image", imgUrl, err.Error())
+						return
+					}
+				}(imgUrl.String())
 			}
 		}
 		messageEvent := format.RenderMarkdown(message.Message(), true, false)
@@ -155,7 +159,7 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 			} else if message.Sender().Is(m.botUser) {
 				return nil
 			}
-			return m.appService.Client(m.ghostId(message.Sender()))
+			return m.appService.Client(senderGhostId)
 		}()
 		if client == nil {
 			return nil
@@ -281,10 +285,11 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			if _, ok := members.Joined[ghostId]; ok {
 				delete(members.Joined, ghostId)
 			}
-			err := m.createMatrixUser(user)
-			if err != nil {
-				return err
-			}
+			go func(user *domain.User) {
+				_ = m.Critical(func(ctx context.Context) error {
+					return m.createMatrixUser(user)
+				})
+			}(user)
 		}
 		for userID := range members.Joined {
 			if userID == m.appService.BotMXID() || userID.String() == m.config.User || userID.Localpart() == m.config.User {

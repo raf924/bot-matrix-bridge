@@ -33,6 +33,9 @@ func (r *RunningContext) Run() error {
 	ctx, cancel := context.WithCancel(r.ctx)
 	err := r.startFn(ctx)
 	cancel()
+	if err == nil && r.Err() != nil {
+		return r.Err()
+	}
 	return err
 }
 
