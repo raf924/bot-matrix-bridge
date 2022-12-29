@@ -8,6 +8,8 @@ type MatrixConfig struct {
 	DisplayName      string                 `yaml:"display_name"`
 	AccessToken      string                 `yaml:"access_token"`
 	SqliteDb         string                 `yaml:"sqlite_db"`
+	Db               string                 `yaml:"db"`
+	ConnectionString string                 `yaml:"connection_string"`
 	Passphrase       string                 `yaml:"passphrase"`
 	AppService       *appservice.AppService `yaml:"app_service"`
 	BridgeConfigPath string                 `yaml:"bridgeConfig"`

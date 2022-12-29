@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/raf924/bot-matrix-bridge/pkg/utils"
 	"github.com/raf924/connector-sdk/domain"
@@ -202,11 +203,11 @@ func (m *matrixBridge) initAppService() error {
 	if err != nil {
 		return err
 	}
-	db, err := sql.Open("sqlite3", m.config.SqliteDb)
+	db, err := sql.Open(m.config.Db, m.config.ConnectionString)
 	if err != nil {
 		return err
 	}
-	withDB, err := dbutil.NewWithDB(db, "sqlite3")
+	withDB, err := dbutil.NewWithDB(db, m.config.Db)
 	if err != nil {
 		return err
 	}
