@@ -7,7 +7,7 @@ require maunium.net/go/mautrix v0.12.4
 require (
 	github.com/mattn/go-sqlite3 v1.14.16
 	github.com/raf924/connector-sdk v1.1.1
-	github.com/raf924/queue v0.1.0
+	github.com/raf924/queue v0.1.1
 	gopkg.in/yaml.v3 v3.0.1
 )
 

@@ -16,8 +16,8 @@ github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINE
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/raf924/connector-sdk v1.1.1 h1:kvDJnKQyahdvKv80Jzm+HBXiGRFnrYG6UATbkm6/IvQ=
 github.com/raf924/connector-sdk v1.1.1/go.mod h1:Nfo+rxQfUxMk890n2yWZTRrNP4jdq1hBTkq0Vqsr+x8=
-github.com/raf924/queue v0.1.0 h1:DdSl/c+CzYX3nDHXVyyLY9IF+TYnjp3fkPp5ii4yLfQ=
-github.com/raf924/queue v0.1.0/go.mod h1:+rjDuAsEROgvj3P4GK2puKD9x99rPwemzim8kdbEvFY=
+github.com/raf924/queue v0.1.1 h1:dLEfNO+rAzbwK5EMMx16YmyYeY8LT44pQB4BZAsYdik=
+github.com/raf924/queue v0.1.1/go.mod h1:+rjDuAsEROgvj3P4GK2puKD9x99rPwemzim8kdbEvFY=
 github.com/rs/xid v1.4.0/go.mod h1:trrq9SKmegXys3aeAKXMUTdJsYXVwGY3RLcfgqegfbg=
 github.com/rs/zerolog v1.28.0 h1:MirSo27VyNi7RJYP3078AA1+Cyzd2GB66qy3aUHvsWY=
 github.com/rs/zerolog v1.28.0/go.mod h1:NILgTygv/Uej1ra5XxGf82ZFSLk58MFGAUS2o6usyD0=

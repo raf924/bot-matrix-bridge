@@ -2,7 +2,6 @@ package utils
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 )
 
@@ -10,15 +9,14 @@ var _ context.Context = (*RunningContext)(nil)
 
 type RunningContext struct {
 	ctx       context.Context
-	cancel    context.CancelFunc
-	err       *atomic.Value
+	cancel    func(err error)
 	doneFuncs []func()
 	startFn   func(ctx context.Context) error
 }
 
 func Runnable(parentCtx context.Context, f func(ctx context.Context) error) *RunningContext {
-	r := &RunningContext{err: &atomic.Value{}}
-	r.ctx, r.cancel = context.WithCancel(parentCtx)
+	r := &RunningContext{}
+	r.ctx, r.cancel = Errorable(parentCtx)
 	r.startFn = f
 	return r
 }
@@ -51,22 +49,21 @@ func (r *RunningContext) Done() <-chan struct{} {
 }
 
 func (r *RunningContext) Err() error {
-	return r.err.Load().(error)
+	return r.ctx.Err()
 }
 
 func (r *RunningContext) Critical(f func(ctx context.Context) error) error {
 	ctx, cancel := context.WithCancel(r.ctx)
 	err := f(ctx)
 	if err != nil {
-		r.err.Store(err)
-		r.cancel()
+		r.cancel(err)
 	}
 	cancel()
 	return err
 }
 
 func (r *RunningContext) OnDone(f func()) {
-	if r.err.Load() != nil {
+	if r.ctx.Err() != nil {
 	}
 	r.doneFuncs = append(r.doneFuncs, f)
 }
