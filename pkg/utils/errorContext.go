@@ -18,7 +18,7 @@ func (e *ErrorContext) CancelWithError(err error) {
 }
 
 func (e *ErrorContext) Err() error {
-	if e.parentCtx == nil {
+	if e.parentCtx.Err() == nil {
 		return e.err
 	}
 	return fmt.Errorf("parent context was cancelled: %w", e.parentCtx.Err())

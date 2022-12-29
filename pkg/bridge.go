@@ -104,7 +104,6 @@ func (m *matrixBridge) formattedMatrixMention(userID id.UserID) string {
 }
 
 func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
-	log.Println("Dispatching server message")
 	var err error
 	switch message := serverMessage.(type) {
 	case *domain.ChatMessage:
@@ -236,12 +235,7 @@ func (m *matrixBridge) startAppService() error {
 	})
 	m.appService.QueryHandler = m
 	m.appService.Ready = true
-	go func() {
-		_ = m.Critical(func(ctx context.Context) error {
-			ep.Start()
-			return fmt.Errorf("event processor stopped")
-		})
-	}()
+	ep.Start()
 	go func() {
 		_ = m.Critical(func(ctx context.Context) error {
 			m.appService.Start()
@@ -280,7 +274,6 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			return err
 		}
 		for _, user := range m.users.All() {
-			log.Println("Checking user", user.Nick())
 			if user.Is(botUser) {
 				continue
 			}
@@ -292,10 +285,8 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			if err != nil {
 				return err
 			}
-			log.Println("Created user", ghostId)
 		}
 		for userID := range members.Joined {
-			log.Println("Checking absent user", userID)
 			if userID == m.appService.BotMXID() || userID.String() == m.config.User || userID.Localpart() == m.config.User {
 				continue
 			}
@@ -405,6 +396,5 @@ func (m *matrixBridge) Accept() (rpc.Dispatcher, error) {
 }
 
 func (m *matrixBridge) Recv() (*domain.ClientMessage, error) {
-	log.Println("Fetching client message")
 	return m.messageConsumer.Consume(m)
 }
