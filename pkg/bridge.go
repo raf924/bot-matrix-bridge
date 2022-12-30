@@ -67,7 +67,7 @@ type matrixBridge struct {
 	messageQueue      queue.Queue[*domain.ClientMessage]
 	dispatcherGiven   bool
 	users             domain.UserList
-	matrixUsers       map[id.UserID]string
+	matrixUsers       *utils.SyncMap[id.UserID, string]
 	appService        *appservice.AppService
 	allowedImageRegex *regexp.Regexp
 }
@@ -82,8 +82,23 @@ func (m *matrixBridge) QueryAlias(alias string) bool {
 }
 
 func (m *matrixBridge) QueryUser(userID id.UserID) bool {
-	_, ok := m.matrixUsers[userID]
-	return ok
+	log.Println("Homeserver is querying user", userID)
+	user, ok := m.matrixUsers.Load(userID)
+	if !ok {
+		return false
+	}
+	var err error
+	err = m.appService.Intent(userID).SetDisplayName(user)
+	if err != nil {
+		log.Println("Failed to set display name for user", userID, ":", err.Error())
+		return false
+	}
+	err = m.appService.Intent(userID).EnsureJoined(id.RoomID(m.config.Room))
+	if err != nil {
+		log.Println("Failed to join user", userID, ":", err.Error())
+		return false
+	}
+	return true
 }
 
 func (m *matrixBridge) matrixMention(userID id.UserID) string {
@@ -124,10 +139,10 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 						println("could not get image", imgUrl, err.Error())
 						return
 					}
-					_, err = senderIntent.SendMessageEvent(id.RoomID(m.config.Room), event.EventMessage, &event.MessageEventContent{
+					_, err = senderIntent.SendMassagedMessageEvent(id.RoomID(m.config.Room), event.EventMessage, &event.MessageEventContent{
 						MsgType: event.MsgImage,
 						URL:     resp.ContentURI.CUString(),
-					})
+					}, message.Timestamp().UnixMilli())
 					if err != nil {
 						println("could not send image", imgUrl, err.Error())
 						return
@@ -148,7 +163,7 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 			messageEvent.Body = strings.ReplaceAll(messageEvent.Body, "@"+user.Nick(), m.matrixMention(m.ghostId(user)))
 			messageEvent.FormattedBody = strings.ReplaceAll(messageEvent.FormattedBody, "@"+user.Nick(), m.formattedMatrixMention(m.ghostId(user)))
 		}
-		client := func() *mautrix.Client {
+		client := func() *appservice.IntentAPI {
 			if message.Private() {
 				if !message.Sender().Is(m.botUser) {
 					messageEvent.Body = m.matrixMention(id.UserID(m.config.User)) + "\n Private message from" + message.Sender().Nick() + "#" + message.Sender().Id() + ":\n" + messageEvent.Body
@@ -156,16 +171,16 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 				} else {
 					messageEvent.MsgType = event.MsgNotice
 				}
-				return m.appService.BotClient()
+				return m.appService.BotIntent()
 			} else if message.Sender().Is(m.botUser) {
 				return nil
 			}
-			return m.appService.Client(senderGhostId)
+			return m.appService.Intent(senderGhostId)
 		}()
 		if client == nil {
 			return nil
 		}
-		_, err = client.SendMessageEvent(id.RoomID(m.config.Room), event.EventMessage, messageEvent)
+		_, err = client.SendMassagedMessageEvent(id.RoomID(m.config.Room), event.EventMessage, messageEvent, message.Timestamp().UnixMilli())
 	case *domain.UserEvent:
 		switch message.EventType() {
 		case domain.UserJoined:
@@ -174,17 +189,12 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 			if err != nil {
 				return err
 			}
-			_, err = m.appService.BotIntent().SendNotice(id.RoomID(m.config.Room), message.User().Nick()+" has joined")
 		case domain.UserLeft:
-			_, err = m.appService.BotIntent().SendNotice(id.RoomID(m.config.Room), message.User().Nick()+" has left")
-			if err != nil {
-				return err
-			}
 			user := m.users.Find(message.User().Nick())
 			if user != nil {
 				ghostId := m.ghostId(user)
 				_, _ = m.appService.Intent(ghostId).LeaveRoom(id.RoomID(m.config.Room))
-				delete(m.matrixUsers, ghostId)
+				m.matrixUsers.Delete(ghostId)
 			}
 			m.users.Remove(message.User())
 		}
@@ -217,6 +227,18 @@ func (m *matrixBridge) initAppService() error {
 		return err
 	}
 	m.appService.StateStore = stateStore
+	m.appService.GetProfile = func(userID id.UserID, roomID id.RoomID) *event.MemberEventContent {
+		user, ok := m.matrixUsers.Load(userID)
+		if !ok {
+			return &event.MemberEventContent{
+				Membership: "leave",
+			}
+		}
+		return &event.MemberEventContent{
+			Membership:  "join",
+			Displayname: user,
+		}
+	}
 	return nil
 }
 
@@ -257,7 +279,7 @@ func (m *matrixBridge) startAppService() error {
 func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUsers domain.UserList, _ string) error {
 	var err error
 	m.RunningContext = utils.Runnable(ctx, func(ctx context.Context) error {
-		m.matrixUsers = map[id.UserID]string{}
+		m.matrixUsers = utils.NewTypedMap[id.UserID, string]()
 		m.messageQueue = queue.NewQueue[*domain.ClientMessage]()
 		m.messageConsumer, err = m.messageQueue.NewConsumer()
 		if err != nil {
@@ -310,11 +332,12 @@ func (m *matrixBridge) ghostId(user *domain.User) id.UserID {
 	validMatrixLocalPart := regexp.MustCompile("(?)([A-Z])").ReplaceAllStringFunc(user.Nick(), func(s string) string {
 		return upperCasePrefix + strings.ToLower(s)
 	})
-	return id.NewUserID(fmt.Sprintf("connector_%s", validMatrixLocalPart), m.appService.HomeserverDomain)
+	return id.NewUserID(fmt.Sprintf("%s_%s", m.appService.Registration.ID, validMatrixLocalPart), m.appService.HomeserverDomain)
 }
 
-func (m *matrixBridge) formatMessageBody(content *event.MessageEventContent, followReply bool) string {
+func (m *matrixBridge) formatMessageBody(content *event.MessageEventContent, followReply bool) (string, id.UserID) {
 	var body string
+	var replyTo id.UserID
 	if content.FormattedBody == "" {
 		body = content.Body
 	} else {
@@ -323,7 +346,12 @@ func (m *matrixBridge) formatMessageBody(content *event.MessageEventContent, fol
 			content.FormattedBody = submatches[0][1]
 			repliedEvent, err := m.appService.BotClient().GetEvent(id.RoomID(m.config.Room), content.RelatesTo.GetReplyTo())
 			if err == nil {
-				body = ">" + m.formatMessageBody(repliedEvent.Content.AsMessage(), false) + "\n\n"
+				if err = repliedEvent.Content.ParseRaw(event.EventMessage); err == nil {
+					repliedMessage := repliedEvent.Content.AsMessage()
+					formattedOriginalMessage, _ := m.formatMessageBody(repliedMessage, false)
+					replyTo = repliedEvent.Sender
+					body = ">" + formattedOriginalMessage + "\n\n"
+				}
 			}
 		}
 		body += mentionRegex.ReplaceAllStringFunc(content.FormattedBody, func(s string) string {
@@ -332,7 +360,7 @@ func (m *matrixBridge) formatMessageBody(content *event.MessageEventContent, fol
 			})
 		})
 	}
-	return body
+	return body, replyTo
 }
 
 func (m *matrixBridge) handleMessage(evt *event.Event) {
@@ -346,11 +374,25 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 	if content.MsgType != event.MsgText && content.MsgType != event.MsgEmote {
 		return
 	}
-	body := m.formatMessageBody(content, true)
+	body, replyTo := m.formatMessageBody(content, true)
+	var to *domain.User
+	if replyTo != "" {
+		if replyTo.String() == m.config.User {
+			to = m.botUser
+		} else {
+			nick, ok := m.matrixUsers.Load(replyTo)
+			if ok {
+				to = m.users.Find(nick)
+			}
+		}
+	}
+	if to != nil {
+		body = "\n" + body
+	}
 	err := m.Critical(func(ctx context.Context) error {
 		switch content.MsgType {
 		case event.MsgText:
-			return m.messageQueue.Produce(domain.NewClientMessage(body, nil, false))
+			return m.messageQueue.Produce(domain.NewClientMessage(body, to, false))
 		case event.MsgEmote:
 			return m.messageQueue.Produce(domain.NewEmote(body))
 		default:
@@ -368,25 +410,15 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 }
 
 func (m *matrixBridge) createMatrixUser(user *domain.User) error {
-	var err error
 	userID := m.ghostId(user)
-	err = m.appService.Intent(userID).EnsureRegistered()
-	if err != nil {
-		return err
+	m.matrixUsers.Store(userID, user.Nick())
+	err := m.appService.BotIntent().EnsureInvited(id.RoomID(m.config.Room), userID)
+	if httpErr, ok := err.(mautrix.HTTPError); ok && httpErr.RespError != nil && strings.Contains(httpErr.RespError.Err, "is already joined to room") {
+		return nil
 	}
-	err = m.appService.Intent(userID).SetDisplayName(user.Nick())
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create matrix user: %w", err)
 	}
-	err = m.appService.BotIntent().EnsureInvited(id.RoomID(m.config.Room), userID)
-	if err != nil {
-		return err
-	}
-	err = m.appService.Intent(userID).EnsureJoined(id.RoomID(m.config.Room))
-	if err != nil {
-		return err
-	}
-	m.matrixUsers[userID] = user.Nick()
 	return nil
 }
 

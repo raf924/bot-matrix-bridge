@@ -7,7 +7,6 @@ type MatrixConfig struct {
 	Room             string                 `yaml:"room"`
 	DisplayName      string                 `yaml:"display_name"`
 	AccessToken      string                 `yaml:"access_token"`
-	SqliteDb         string                 `yaml:"sqlite_db"`
 	Db               string                 `yaml:"db"`
 	ConnectionString string                 `yaml:"connection_string"`
 	Passphrase       string                 `yaml:"passphrase"`
