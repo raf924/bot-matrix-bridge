@@ -342,7 +342,6 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 				_ = m.Critical(func(ctx context.Context) error {
 					return m.createMatrixUser(user)
 				})
-				_ = m.appService.Intent(ghostId).SetPresence(event.PresenceOnline)
 			}(user)
 		}
 		for userID := range members.Joined {
