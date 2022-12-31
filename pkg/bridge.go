@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const upperCasePrefix = "="
@@ -91,11 +92,6 @@ func (m *matrixBridge) QueryUser(userID id.UserID) bool {
 	err = m.appService.Intent(userID).SetDisplayName(user)
 	if err != nil {
 		log.Println("Failed to set display name for user", userID, ":", err.Error())
-		return false
-	}
-	err = m.appService.Intent(userID).EnsureJoined(id.RoomID(m.config.Room))
-	if err != nil {
-		log.Println("Failed to join user", userID, ":", err.Error())
 		return false
 	}
 	return true
@@ -189,6 +185,7 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 			if err != nil {
 				return err
 			}
+			_ = m.appService.Intent(m.ghostId(message.User())).SetPresence(event.PresenceOnline)
 		case domain.UserLeft:
 			user := m.users.Find(message.User().Nick())
 			if user != nil {
@@ -255,7 +252,40 @@ func (m *matrixBridge) startAppService() error {
 	if err == nil {
 		return fmt.Errorf("room `%s` is encrypted", m.config.Room)
 	}
+	_ = m.appService.BotIntent().SetPresence(event.PresenceOnline)
 	ep := appservice.NewEventProcessor(m.appService)
+	presenceTracker := time.NewTicker(3 * time.Minute)
+	go func() {
+		_ = m.Critical(func(ctx context.Context) error {
+			for {
+				select {
+				case <-ctx.Done():
+					presenceTracker.Stop()
+					return nil
+				case <-presenceTracker.C:
+					m.matrixUsers.Range(func(key id.UserID, value string) bool {
+						if ctx.Err() != nil {
+							return false
+						}
+						intent := m.appService.Intent(key)
+						presence, err := intent.GetPresence(key)
+						if err != nil {
+							log.Println("failed to get presence", err.Error())
+							return false
+						}
+						if !presence.CurrentlyActive && presence.Presence == event.PresenceOnline {
+							err = intent.SetPresence(event.PresenceOffline)
+							if err != nil {
+								log.Println("failed to set presence", err.Error())
+								return false
+							}
+						}
+						return true
+					})
+				}
+			}
+		})
+	}()
 	ep.On(event.EventMessage, func(evt *event.Event) {
 		println(evt.Type.Type, evt.Sender, evt.RoomID, evt.Content.AsMessage().FormattedBody)
 		m.handleMessage(evt)
@@ -301,10 +331,10 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 			return err
 		}
 		for _, user := range m.users.All() {
+			ghostId := m.ghostId(user)
 			if user.Is(botUser) {
 				continue
 			}
-			ghostId := m.ghostId(user)
 			if _, ok := members.Joined[ghostId]; ok {
 				delete(members.Joined, ghostId)
 			}
@@ -312,6 +342,7 @@ func (m *matrixBridge) Start(ctx context.Context, botUser *domain.User, onlineUs
 				_ = m.Critical(func(ctx context.Context) error {
 					return m.createMatrixUser(user)
 				})
+				_ = m.appService.Intent(ghostId).SetPresence(event.PresenceOnline)
 			}(user)
 		}
 		for userID := range members.Joined {
@@ -412,7 +443,7 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	userID := m.ghostId(user)
 	m.matrixUsers.Store(userID, user.Nick())
-	err := m.appService.BotIntent().EnsureInvited(id.RoomID(m.config.Room), userID)
+	err := m.appService.Intent(userID).EnsureJoined(id.RoomID(m.config.Room))
 	if httpErr, ok := err.(mautrix.HTTPError); ok && httpErr.RespError != nil && strings.Contains(httpErr.RespError.Err, "is already joined to room") {
 		return nil
 	}
