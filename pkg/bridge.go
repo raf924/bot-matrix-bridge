@@ -248,6 +248,10 @@ func (m *matrixBridge) startAppService() error {
 	if err != nil {
 		return err
 	}
+	err = m.appService.BotIntent().EnsureJoined(id.RoomID(m.config.Space))
+	if err != nil {
+		return err
+	}
 	err = m.appService.BotIntent().EnsureJoined(id.RoomID(m.config.Room))
 	if err != nil {
 		return err
@@ -443,17 +447,28 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 	}
 }
 
-func (m *matrixBridge) createMatrixUser(user *domain.User) error {
-	userID := m.ghostId(user)
-	m.matrixUsers.Store(userID, user.Nick())
-	err := m.appService.Intent(userID).EnsureJoined(id.RoomID(m.config.Room))
+func (m *matrixBridge) joinSpace(userID id.UserID) error {
+	err := m.appService.Intent(userID).EnsureJoined(
+		id.RoomID(m.config.Space),
+		appservice.EnsureJoinedParams{BotOverride: m.appService.BotClient()},
+	)
 	if httpErr, ok := err.(mautrix.HTTPError); ok && httpErr.RespError != nil && strings.Contains(httpErr.RespError.Err, "is already joined to room") {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("failed to create matrix user: %w", err)
-	}
-	return nil
+	return err
+}
+
+func (m *matrixBridge) createMatrixUser(user *domain.User) error {
+	userID := m.ghostId(user)
+	m.matrixUsers.Store(userID, user.Nick())
+	return (&utils.PipeLine{}).
+		Then(func() error {
+			return m.joinSpace(userID)
+		}, "failed to join space").
+		Then(func() error {
+			return m.appService.Intent(userID).EnsureJoined(id.RoomID(m.config.Room))
+		}, "failed to join room").
+		Err("failed to create matrix user")
 }
 
 func (m *matrixBridge) Accept() (rpc.Dispatcher, error) {
