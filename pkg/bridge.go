@@ -121,6 +121,9 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 	case *domain.ChatMessage:
 		senderGhostId := m.ghostId(message.Sender())
 		senderIntent := m.appService.Intent(senderGhostId)
+		go func() {
+			_ = m.appService.Intent(senderGhostId).SetDisplayName(message.Sender().Nick())
+		}()
 		if m.config.ImageDisplay.Enabled {
 			submatches := m.allowedImageRegex.FindAllStringSubmatch(message.Message(), -1)
 			for _, submatch := range submatches {
