@@ -177,6 +177,10 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 			return nil
 		}
 		_, err = client.SendMassagedMessageEvent(id.RoomID(m.config.Room), event.EventMessage, messageEvent, message.Timestamp().UnixMilli())
+		if err != nil {
+			return err
+		}
+		_ = client.SetPresence(event.PresenceOnline)
 	case *domain.UserEvent:
 		switch message.EventType() {
 		case domain.UserJoined:
