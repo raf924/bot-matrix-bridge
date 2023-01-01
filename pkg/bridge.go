@@ -89,7 +89,7 @@ func (m *matrixBridge) QueryUser(userID id.UserID) bool {
 		return false
 	}
 	var err error
-	err = m.appService.Intent(userID).SetDisplayName(user)
+	err = m.appService.Client(userID).SetDisplayName(user)
 	if err != nil {
 		log.Println("Failed to set display name for user", userID, ":", err.Error())
 		return false
@@ -122,7 +122,7 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 		senderGhostId := m.ghostId(message.Sender())
 		senderIntent := m.appService.Intent(senderGhostId)
 		go func() {
-			_ = m.appService.Intent(senderGhostId).SetDisplayName(message.Sender().Nick())
+			_ = m.appService.Client(senderGhostId).SetDisplayName(message.Sender().Nick())
 		}()
 		if m.config.ImageDisplay.Enabled {
 			submatches := m.allowedImageRegex.FindAllStringSubmatch(message.Message(), -1)
@@ -450,9 +450,9 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 	}
 }
 
-func (m *matrixBridge) joinSpace(userID id.UserID) error {
+func (m *matrixBridge) joinRoom(userID id.UserID, roomID id.RoomID) error {
 	err := m.appService.Intent(userID).EnsureJoined(
-		id.RoomID(m.config.Space),
+		roomID,
 		appservice.EnsureJoinedParams{BotOverride: m.appService.BotClient()},
 	)
 	if httpErr, ok := err.(mautrix.HTTPError); ok && httpErr.RespError != nil && strings.Contains(httpErr.RespError.Err, "is already joined to room") {
@@ -463,13 +463,14 @@ func (m *matrixBridge) joinSpace(userID id.UserID) error {
 
 func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	userID := m.ghostId(user)
+	m.appService.Intent(userID).IsCustomPuppet = true
 	m.matrixUsers.Store(userID, user.Nick())
 	return (&utils.PipeLine{}).
 		Then(func() error {
-			return m.joinSpace(userID)
+			return m.joinRoom(userID, id.RoomID(m.config.Space))
 		}, "failed to join space").
 		Then(func() error {
-			return m.appService.Intent(userID).EnsureJoined(id.RoomID(m.config.Room))
+			return m.joinRoom(userID, id.RoomID(m.config.Room))
 		}, "failed to join room").
 		Err("failed to create matrix user")
 }
