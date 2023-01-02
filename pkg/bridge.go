@@ -84,22 +84,8 @@ func (m *matrixBridge) QueryAlias(alias string) bool {
 
 func (m *matrixBridge) QueryUser(userID id.UserID) bool {
 	log.Println("Homeserver is querying user", userID)
-	user, ok := m.matrixUsers.Load(userID)
-	err := (&utils.PipeLine{}).
-		Then(func() error {
-			if !ok {
-				return fmt.Errorf("user does not exist on remote service")
-			}
-			return nil
-		}).
-		Then(func() error {
-			return m.appService.Intent(userID).Register()
-		}).Then(func() error {
-		return m.appService.Client(userID).SetDisplayName(user)
-	}, "failed to set display name").
-		Err()
-	log.Println(err.Error())
-	return err == nil
+	_, ok := m.matrixUsers.Load(userID)
+	return ok
 }
 
 func (m *matrixBridge) matrixMention(userID id.UserID) string {
@@ -312,7 +298,10 @@ func (m *matrixBridge) startAppService() error {
 	go func() {
 		_ = m.Critical(func(ctx context.Context) error {
 			m.appService.Start()
-			return fmt.Errorf("appservice stopped")
+			if m.Err() == nil {
+				return fmt.Errorf("appservice stopped")
+			}
+			return nil
 		})
 	}()
 	m.OnDone(func() {
@@ -460,6 +449,7 @@ func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	m.appService.Intent(userID).IsCustomPuppet = true
 	m.matrixUsers.Store(userID, user.Nick())
 	return (&utils.PipeLine{}).
+		Then(m.appService.Intent(userID).EnsureRegistered).
 		Then(func() error {
 			_, err := m.appService.BotIntent().InviteUser(id.RoomID(m.config.Space), &mautrix.ReqInviteUser{UserID: userID})
 			if httpErr, ok := err.(mautrix.HTTPError); ok && httpErr.RespError != nil && strings.Contains(httpErr.RespError.Err, "is already joined to room") {
