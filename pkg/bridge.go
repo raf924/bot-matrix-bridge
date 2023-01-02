@@ -88,13 +88,13 @@ func (m *matrixBridge) QueryUser(userID id.UserID) bool {
 	if !ok {
 		return false
 	}
-	var err error
-	err = m.appService.Client(userID).SetDisplayName(user)
-	if err != nil {
-		log.Println("Failed to set display name for user", userID, ":", err.Error())
-		return false
-	}
-	return true
+	err := (&utils.PipeLine{}).Then(func() error {
+		return m.appService.Intent(userID).Register()
+	}).Then(func() error {
+		return m.appService.Client(userID).SetDisplayName(user)
+	}, "failed to set display name").
+		Err()
+	return err == nil
 }
 
 func (m *matrixBridge) matrixMention(userID id.UserID) string {
