@@ -85,15 +85,20 @@ func (m *matrixBridge) QueryAlias(alias string) bool {
 func (m *matrixBridge) QueryUser(userID id.UserID) bool {
 	log.Println("Homeserver is querying user", userID)
 	user, ok := m.matrixUsers.Load(userID)
-	if !ok {
-		return false
-	}
-	err := (&utils.PipeLine{}).Then(func() error {
-		return m.appService.Intent(userID).Register()
-	}).Then(func() error {
+	err := (&utils.PipeLine{}).
+		Then(func() error {
+			if !ok {
+				return fmt.Errorf("user does not exist on remote service")
+			}
+			return nil
+		}).
+		Then(func() error {
+			return m.appService.Intent(userID).Register()
+		}).Then(func() error {
 		return m.appService.Client(userID).SetDisplayName(user)
 	}, "failed to set display name").
 		Err()
+	log.Println(err.Error())
 	return err == nil
 }
 
@@ -450,27 +455,25 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 	}
 }
 
-func (m *matrixBridge) joinRoom(userID id.UserID, roomID id.RoomID) error {
-	err := m.appService.Intent(userID).EnsureJoined(
-		roomID,
-		appservice.EnsureJoinedParams{BotOverride: m.appService.BotClient()},
-	)
-	if httpErr, ok := err.(mautrix.HTTPError); ok && httpErr.RespError != nil && strings.Contains(httpErr.RespError.Err, "is already joined to room") {
-		return nil
-	}
-	return err
-}
-
 func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	userID := m.ghostId(user)
 	m.appService.Intent(userID).IsCustomPuppet = true
 	m.matrixUsers.Store(userID, user.Nick())
 	return (&utils.PipeLine{}).
 		Then(func() error {
-			return m.joinRoom(userID, id.RoomID(m.config.Space))
+			_, err := m.appService.BotIntent().InviteUser(id.RoomID(m.config.Space), &mautrix.ReqInviteUser{UserID: userID})
+			if httpErr, ok := err.(mautrix.HTTPError); ok && httpErr.RespError != nil && strings.Contains(httpErr.RespError.Err, "is already joined to room") {
+				return nil
+			}
+			return err
+		}).
+		Then(func() error {
+			_, err := m.appService.Intent(userID).JoinRoomByID(id.RoomID(m.config.Space))
+			return err
 		}, "failed to join space").
 		Then(func() error {
-			return m.joinRoom(userID, id.RoomID(m.config.Room))
+			_, err := m.appService.Intent(userID).JoinRoomByID(id.RoomID(m.config.Room))
+			return err
 		}, "failed to join room").
 		Err("failed to create matrix user")
 }
