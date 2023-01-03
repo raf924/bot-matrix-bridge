@@ -141,8 +141,10 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 		}
 		messageEvent := func() (evt event.MessageEventContent) {
 			defer func() {
-				recover()
-				evt = format.RenderMarkdown(message.Message(), false, false)
+				err := recover()
+				if err != nil {
+					evt = format.RenderMarkdown(message.Message(), false, false)
+				}
 			}()
 			evt = format.RenderMarkdown(message.Message(), true, false)
 			return
