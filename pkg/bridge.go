@@ -139,7 +139,14 @@ func (m *matrixBridge) Dispatch(serverMessage domain.ServerMessage) error {
 				}(imgUrl.String())
 			}
 		}
-		messageEvent := format.RenderMarkdown(message.Message(), true, false)
+		messageEvent := func() (evt event.MessageEventContent) {
+			defer func() {
+				recover()
+				evt = format.RenderMarkdown(message.Message(), false, false)
+			}()
+			evt = format.RenderMarkdown(message.Message(), true, false)
+			return
+		}()
 		if messageEvent.FormattedBody == "" {
 			messageEvent.FormattedBody = messageEvent.Body
 			messageEvent.Format = event.FormatHTML
