@@ -5,7 +5,6 @@ import "maunium.net/go/mautrix/appservice"
 type MatrixConfig struct {
 	User             string                 `yaml:"user"`
 	Room             string                 `yaml:"room"`
-	Space            string                 `yaml:"space"`
 	DisplayName      string                 `yaml:"display_name"`
 	AccessToken      string                 `yaml:"access_token"`
 	Db               string                 `yaml:"db"`

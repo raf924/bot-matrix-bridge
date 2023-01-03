@@ -14,7 +14,6 @@ import (
 	"github.com/raf924/queue"
 	"gopkg.in/yaml.v3"
 	"log"
-	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/appservice/sqlstatestore"
 	"maunium.net/go/mautrix/event"
@@ -223,6 +222,12 @@ func (m *matrixBridge) initAppService() error {
 	}
 	m.appService.StateStore = stateStore
 	m.appService.GetProfile = func(userID id.UserID, roomID id.RoomID) *event.MemberEventContent {
+		if m.appService.BotIntent().AppServiceUserID == userID {
+			return &event.MemberEventContent{
+				Membership:  "join",
+				Displayname: m.config.DisplayName,
+			}
+		}
 		user, ok := m.matrixUsers.Load(userID)
 		if !ok {
 			return &event.MemberEventContent{
@@ -238,15 +243,13 @@ func (m *matrixBridge) initAppService() error {
 }
 
 func (m *matrixBridge) startAppService() error {
-	err := m.appService.BotIntent().SetDisplayName(m.config.DisplayName)
-	if err != nil {
-		return err
-	}
-	err = m.appService.BotIntent().EnsureJoined(id.RoomID(m.config.Space))
-	if err != nil {
-		return err
-	}
-	err = m.appService.BotIntent().EnsureJoined(id.RoomID(m.config.Room))
+	err := (&utils.PipeLine{}).
+		Then(func() error {
+			return m.appService.BotIntent().SetDisplayName(m.config.DisplayName)
+		}).
+		Then(func() error {
+			return m.appService.BotIntent().EnsureJoined(id.RoomID(m.config.Room))
+		}).Err()
 	if err != nil {
 		return err
 	}
@@ -446,22 +449,11 @@ func (m *matrixBridge) handleMessage(evt *event.Event) {
 
 func (m *matrixBridge) createMatrixUser(user *domain.User) error {
 	userID := m.ghostId(user)
-	m.appService.Intent(userID).IsCustomPuppet = true
 	m.matrixUsers.Store(userID, user.Nick())
 	return (&utils.PipeLine{}).
 		Then(m.appService.Intent(userID).EnsureRegistered).
 		Then(func() error {
-			_, err := m.appService.BotIntent().InviteUser(id.RoomID(m.config.Space), &mautrix.ReqInviteUser{UserID: userID})
-			if httpErr, ok := err.(mautrix.HTTPError); ok && httpErr.RespError != nil && strings.Contains(httpErr.RespError.Err, "is already joined to room") {
-				return nil
-			}
-			return err
-		}).
-		Then(func() error {
-			_, err := m.appService.Intent(userID).JoinRoomByID(id.RoomID(m.config.Space))
-			return err
-		}, "failed to join space").
-		Then(func() error {
+			m.appService.Intent(userID).IsCustomPuppet = true
 			_, err := m.appService.Intent(userID).JoinRoomByID(id.RoomID(m.config.Room))
 			return err
 		}, "failed to join room").
