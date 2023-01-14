@@ -248,6 +248,7 @@ func (m *matrixBridge) initAppService() error {
 			Displayname: user,
 		}
 	}
+	m.appService.HTTPClient.Timeout = 10 * time.Minute
 	return nil
 }
 
